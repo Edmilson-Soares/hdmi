@@ -1,0 +1,207 @@
+// Texto para fala e áudio no HDMI: o texto aparece no monitor como legenda
+// enquanto é falado pelo áudio do HDMI (as caixas de som do monitor/TV).
+//
+//   fogu run audio.fg
+//   fogu run audio.fg --texto "Bom dia a todos" --voz Helia --velocidade 1
+//   fogu run audio.fg --arquivo musica.mp3        (depois da fala, toca o arquivo)
+//   fogu run audio.fg --sem-tela                  (só o áudio)
+//   fogu run audio.fg --vozes                     (lista vozes e saídas de som)
+//   fogu run audio.fg --foto out/audio.bmp        (salva um quadro no meio da fala)
+//   fogu run audio.fg --diagnostico               (por que não sai som? mede o sinal)
+//   fogu run audio.fg --saida padrao              (outra saída: "padrao", "Realtek", "Headset"…)
+import tela from "./tela.fg"
+import som from "./som.fg"
+import time from "fogu:time"
+
+// Toca um tom pela saída e mede o sinal que realmente passa por ela.
+fn medir(opts) {
+    const b = som.tom(440, 1500, opts)?
+    let maior = 0.0
+    while b.tocando() {
+        const p = som.pico(opts)?
+        if p > maior { maior = p }
+        time.sleep(0.05)
+    }
+    b.esperar()?
+    return maior, nil
+}
+
+fn diagnostico() {
+    print("saídas de som:")
+    for d in som.dispositivos()? {
+        let extra = ""
+        if d.display { extra += "  <- monitor/TV (HDMI)" }
+        if d.default { extra += "  (padrão do Windows)" }
+        const [v, _e] = som.volumeSistema({ dispositivo: d.id })
+        let vol = ""
+        if v != nil {
+            vol = ` volume ${v.volume}%`
+            if v.mudo { vol += " SEM SOM (mudo)" }
+        }
+        print(`  ${d.name}${vol}${extra}`)
+    }
+    const hdmi = { dispositivo: "hdmi" }
+    const v = som.volumeSistema(hdmi)?
+    print(`\nHDMI: volume do Windows ${v.volume}%, mudo: ${v.mudo}`)
+    if v.mudo || v.volume < 20 {
+        print("  -> estava mudo ou muito baixo; ajustando para 80% e com som")
+        som.setVolumeSistema(80, { dispositivo: "hdmi", mudo: false })?
+    }
+    print("tocando um tom de 440 Hz por 1,5 s no HDMI e medindo o sinal...")
+    const p = medir(hdmi)?
+    print(`  pico do sinal na saída HDMI: ${int(p * 100)}%`)
+    if p < 0.01 {
+        print("  -> o sinal NÃO está chegando à saída HDMI do Windows.")
+    } else {
+        print("  -> o sinal está saindo pelo cabo HDMI. Se não se ouve nada, o problema é no monitor:")
+        print("     · ele tem colunas? Muitos monitores LG FHD não têm; use fones/caixas na saída")
+        print("       de áudio (headphone) do monitor;")
+        print("     · veja o volume e o mudo no menu do próprio monitor (botão/joystick atrás);")
+        print("     · em alguns monitores é preciso escolher a fonte de áudio HDMI no menu.")
+    }
+    print("\npara comparar, o mesmo tom na saída padrão do PC...")
+    const pp = medir({ dispositivo: "padrao" })?
+    print(`  pico na saída padrão: ${int(pp * 100)}%`)
+    som.fechar()
+    return true, nil
+}
+
+fn opcao(nome, padrao) {
+    const args = Fogu.args
+    for i, a in args {
+        if a == nome && i + 1 < len(args) && !args[i + 1].starts_with("--") { return args[i + 1] }
+        if a == nome { return "sim" }
+    }
+    return padrao
+}
+
+const TEXTO_PADRAO = "Olá! Eu sou uma voz sintetizada pelo Windows, controlada por um programa em Fogu. O som sai pelo cabo HDMI, nas colunas do monitor, e o texto aparece aqui no ecrã."
+
+// Quebra o texto em linhas que caibam na largura.
+fn quebrar(t, texto, tamanho, largura) {
+    const linhas = []
+    let atual = ""
+    for p in texto.split(" ") {
+        let tentativa = p
+        if atual != "" { tentativa = `${atual} ${p}` }
+        if atual != "" && t.medir(tentativa, tamanho).largura > largura {
+            linhas.push(atual)
+            atual = p
+        } else {
+            atual = tentativa
+        }
+    }
+    if atual != "" { linhas.push(atual) }
+    return linhas
+}
+
+// Ícone de alto-falante com ondas que pulsam enquanto toca.
+fn altoFalante(t, s, cx, cy, fase, ativo) {
+    if ativo {
+        for i in 0..3 {
+            const a = 90 + int(80 * tela.sin(fase - i * 0.9))
+            t.anel(cx, cy, (70 + i * 40) * s, tela.rgba(56, 189, 248, a), 9 * s)
+        }
+        // cobre a metade esquerda dos anéis: ficam só os arcos à direita
+        t.retangulo(cx - 220 * s, cy - 220 * s, 250 * s, 440 * s, 0)
+    }
+    // caixa + cone (trapézio feito de dois triângulos)
+    const c = 0xE2E8F0
+    t.arredondado(cx - 110 * s, cy - 32 * s, 46 * s, 64 * s, 6 * s, c)
+    t.triangulo(cx - 70 * s, cy - 32 * s, cx - 10 * s, cy - 80 * s, cx - 10 * s, cy + 80 * s, c)
+    t.triangulo(cx - 70 * s, cy - 32 * s, cx - 10 * s, cy + 80 * s, cx - 70 * s, cy + 32 * s, c)
+    t.linha(cx - 70 * s, cy - 32 * s, cx - 10 * s, cy + 80 * s, c, 2)   // esconde a emenda
+}
+
+fn mostrarSom(t, s, titulo, linhas, snd) {
+    const fase0 = time.monotonic()
+    let foto = opcao("--foto", "")
+    while snd.tocando() && t.aberta() {
+        const k = t.tecla()
+        if k == 81 || k == tela.teclas.espaco { snd.parar(); break }
+        const pos = snd.posicao()
+        const dur = snd.duracao()
+        t.limpar(0)
+        altoFalante(t, s, 260 * s, t.altura / 2 - 60 * s, (time.monotonic() - fase0) * 8.0, true)
+        t.fonte("Segoe UI", true)
+        t.texto(520 * s, 120 * s, titulo, 0x38BDF8, 40 * s)
+        t.fonte("Segoe UI", false)
+        // legenda: as linhas vão acendendo conforme a fala avança
+        let y = 200 * s
+        for i, l in linhas {
+            let cor = 0x475569
+            if dur > 0 && i * dur / len(linhas) <= pos { cor = 0xF8FAFC }
+            t.texto(520 * s, y, l, cor, 52 * s)
+            y += 72 * s
+        }
+        // barra de progresso
+        const bx = 520 * s
+        const bw = t.largura - bx - 120 * s
+        const by = t.altura - 160 * s
+        t.arredondado(bx, by, bw, 14 * s, 7 * s, 0x1E293B)
+        if dur > 0 {
+            t.arredondado(bx, by, bw * pos / dur, 14 * s, 7 * s, 0x38BDF8)
+            t.texto(bx, by + 30 * s, `${pos / 1000}.${pos / 100 % 10} s / ${dur / 1000}.${dur / 100 % 10} s · espaço ou Q pula`, 0x94A3B8, 28 * s)
+        }
+        t.mostrar()
+        if foto != "" && dur > 0 && pos * 2 >= dur {
+            t.salvar(foto)
+            foto = ""
+        }
+        time.sleep(0.03)
+    }
+    snd.esperar()
+}
+
+fn main() {
+    if opcao("--diagnostico", "") != "" { return diagnostico() }
+    if opcao("--vozes", "") != "" {
+        print("vozes:")
+        for v in som.vozes()? { print(`  ${v.name} [${v.language}]`) }
+        print("saídas de som:")
+        for d in som.dispositivos()? {
+            let extra = ""
+            if d.display { extra += " (monitor/TV: HDMI ou DisplayPort)" }
+            if d.default { extra += " (padrão)" }
+            print(`  ${d.name}${extra}`)
+        }
+        return true, nil
+    }
+
+    const texto = opcao("--texto", TEXTO_PADRAO)
+    const opts = { voz: opcao("--voz", "pt"), velocidade: int(opcao("--velocidade", "0")), dispositivo: opcao("--saida", "hdmi") }
+    const arquivo = opcao("--arquivo", "")
+    const semTela = opcao("--sem-tela", "") != ""
+
+    if semTela {
+        const f = som.falar(texto, opts)?
+        print(`falando (${f.duracao()} ms) pela saída "${opts.dispositivo}"...`)
+        f.esperar()?
+        if arquivo != "" {
+            const m = som.tocar(arquivo, { dispositivo: opts.dispositivo })?
+            print(`tocando ${arquivo} (${m.duracao()} ms)...`)
+            m.esperar()?
+        }
+        som.fechar()
+        return true, nil
+    }
+
+    const t = tela.abrir()?
+    const s = t.altura / 1080.0
+    t.fonte("Segoe UI", false)
+    const linhas = quebrar(t, texto, 52 * s, t.largura - 640 * s)
+    const f = som.falar(texto, opts)?
+    print(`falando no ${t.monitor.name} (${f.duracao()} ms)`)
+    mostrarSom(t, s, "Texto para fala · áudio HDMI", linhas, f)
+    if arquivo != "" && t.aberta() {
+        const m = som.tocar(arquivo, { dispositivo: opts.dispositivo })?
+        print(`tocando ${arquivo}`)
+        mostrarSom(t, s, "Áudio HDMI", [arquivo], m)
+    }
+    t.fechar()?
+    som.fechar()
+    return true, nil
+}
+
+const [_ok, err] = main()
+if err != nil { print(`erro: ${err.message}`) }

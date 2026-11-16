@@ -1,0 +1,104 @@
+// Testes do som.fg. Precisam da lib nativa (fogu run build:native).
+// Não mexem nos monitores; os que tocam usam volume 0 na saída padrão.
+//   fogu test
+import { test, expect } from "fogu:test"
+import som from "./som.fg"
+import fs from "fogu:fs"
+import time from "fogu:time"
+
+test("lista saídas de som", (): error => {
+    const devs = som.dispositivos()?
+    expect(len(devs) > 0).toBe(true)
+    let padrao = 0
+    for d in devs {
+        expect(typeof(d.id)).toBe("str")
+        expect(typeof(d.display)).toBe("bool")
+        if d.default { padrao += 1 }
+    }
+    expect(padrao).toBe(1)
+    return nil
+})
+
+test("lista vozes", (): error => {
+    const vs = som.vozes()?
+    expect(len(vs) > 0).toBe(true)
+    for v in vs { expect(v.id).toContain("HKEY_LOCAL_MACHINE") }
+    return nil
+})
+
+test("grava fala em WAV", (): error => {
+    som.gravarFala("Teste de fala.", "out/test_fala.wav")?
+    expect(fs.exists("out/test_fala.wav")).toBe(true)
+    som.gravarFala("<rate speed=\"5\">rápido</rate><silence msec=\"200\"/>pausa", "out/test_ssml.wav", { ssml: true })?
+    expect(fs.exists("out/test_ssml.wav")).toBe(true)
+    return nil
+})
+
+test("erros claros", (): error => {
+    const [_a, e1] = som.gravarFala("x", "out/x.wav", { voz: "voz-que-nao-existe" })
+    expect(e1.message).toContain("not found")
+    const [_b, e2] = som.tocar("nao_existe.mp3", { dispositivo: "padrao" })
+    expect(e2.message).toContain("file not found")
+    const [_c, e3] = som.tom(440, 100, { dispositivo: "saida-que-nao-existe" })
+    expect(e3.message).toContain("não encontrada")
+    return nil
+})
+
+test("grava fala em mp3 e m4a", (): error => {
+    for ext in ["mp3", "m4a"] {
+        som.gravarFala("Teste de fala comprimida.", `out/test_fala.${ext}`, { voz: "pt" })?
+        expect(fs.exists(`out/test_fala.${ext}`)).toBe(true)
+    }
+    const [_x, err] = som.gravarFala("x", "out/x.ogg")
+    expect(err.message).toContain(".mp3")
+    return nil
+})
+
+// Os testes abaixo tocam de verdade, com volume 0 e na saída padrão (não
+// fazem barulho nem ativam o HDMI): passam por todo o caminho de reprodução.
+
+// Toca até o fim e devolve [duração informada, tempo que levou, última posição].
+fn tocarAteOFim(s) {
+    const dur = s.duracao()
+    const t0 = time.monotonic()
+    let pos = 0
+    while s.tocando() {
+        pos = s.posicao()
+        time.sleep(0.02)
+    }
+    const levou = int((time.monotonic() - t0) * 1000)
+    s.esperar()?
+    return [dur, levou, pos], nil
+}
+
+test("toca um tom até o fim", (): error => {
+    const r = tocarAteOFim(som.tom(440, 400, { dispositivo: "padrao", volume: 0 })?)?
+    expect(r[0]).toBe(400)
+    expect(r[1] >= 350 && r[1] < 2000).toBe(true)
+    return nil
+})
+
+test("toca mp3, m4a e wav decodificados pelo Windows", (): error => {
+    som.gravarFala("Um, dois, três.", "out/test_tocar.wav", { voz: "pt" })?
+    som.gravarFala("Um, dois, três.", "out/test_tocar.mp3", { voz: "pt" })?
+    som.gravarFala("Um, dois, três.", "out/test_tocar.m4a", { voz: "pt" })?
+    for ext in ["wav", "mp3", "m4a"] {
+        const r = tocarAteOFim(som.tocar(`out/test_tocar.${ext}`, { dispositivo: "padrao", volume: 0 })?)?
+        // a duração do arquivo é conhecida, e tocar leva mais ou menos esse tempo
+        expect(r[0] > 500).toBe(true)
+        expect(r[1] >= r[0] - 300 && r[1] < r[0] + 1500).toBe(true)
+        expect(r[2] > r[0] / 2).toBe(true)
+    }
+    return nil
+})
+
+test("fala até o fim e pode ser parada", (): error => {
+    const r = tocarAteOFim(som.falar("Olá.", { dispositivo: "padrao", volume: 0, voz: "pt" })?)?
+    expect(r[0] > 200).toBe(true)
+    const longa = som.falar("Esta frase é comprida e vai ser interrompida antes do fim.", { dispositivo: "padrao", volume: 0 })?
+    time.sleep(0.3)
+    expect(longa.tocando()).toBe(true)
+    longa.parar()?
+    expect(longa.tocando()).toBe(false)
+    return nil
+})

@@ -1,0 +1,12 @@
+{
+  "lockfileVersion": 1,
+  "packages": {
+    "hardware": {
+      "spec": "https://fogulang.microaitec.com/libs/hardware/0.1.0.tar.gz",
+      "resolved": "https://fogulang.microaitec.com/libs/hardware/0.1.0.tar.gz",
+      "commit": "667b6f0f1126073a1e17badddb28d7a8aeeb2562555d076137def918bf28240a",
+      "version": "0.1.0",
+      "integrity": "sha256-b274b4c5c991f33d7cfd2e0efe6e94679a4fec731072e7027e3d0202f7d6ac35"
+    }
+  }
+}

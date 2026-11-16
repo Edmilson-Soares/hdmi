@@ -1,0 +1,215 @@
+// Desenha uma cena animada no monitor ligado na porta HDMI.
+//
+//   fogu run build:native        (uma vez: compila native/foguhdmi.dll)
+//   fogu run main.fg             (Esc ou Q fecha)
+//   fogu run main.fg --segundos 10 --foto out/tela.bmp
+//
+// Se a TV/monitor estiver no HDMI mas o Windows estiver em "Somente tela do
+// PC", a tela é estendida para o HDMI e volta ao modo anterior no fim.
+// Com um adaptador HDMI-CEC (libCEC/cec-client), a lib `hardware` ainda liga
+// a TV e a troca para a nossa entrada.
+import tela from "./tela.fg"
+import hdmi from "hardware/hdmi"
+import time from "fogu:time"
+
+// ---------- argumentos ----------
+
+fn opcao(nome, padrao) {
+    const args = Fogu.args
+    for i, a in args {
+        if a == nome && i + 1 < len(args) { return args[i + 1] }
+    }
+    return padrao
+}
+
+// ---------- HDMI-CEC (opcional) ----------
+
+fn acordarTv() {
+    const [cec, err] = hdmi.open({ name: "Fogu" })
+    if err != nil {
+        print(`CEC: sem adaptador (${err.message}); seguindo sem ligar a TV`)
+        return
+    }
+    cec.on()
+    cec.activeSource()
+    print(`CEC: TV ligada e na nossa entrada (${cec.backend})`)
+    cec.close()
+}
+
+// ---------- cena ----------
+
+struct Bola {
+    x = 0.0
+    y = 0.0
+    vx = 0.0
+    vy = 0.0
+    r = 20
+    cor = 0
+
+    new(largura, altura, i) {
+        this.r = 18 + tela.random(30)
+        this.x = float(this.r + tela.random(largura - 2 * this.r))
+        this.y = float(this.r + tela.random(altura / 2))
+        this.vx = float(tela.random(9) + 3)
+        this.vy = float(tela.random(5) + 1)
+        if tela.random(2) == 0 { this.vx = -this.vx }
+        this.cor = tela.hsv(i * 37)
+    }
+
+    passo(largura, chao) {
+        this.vy += 0.5
+        this.x += this.vx
+        this.y += this.vy
+        if this.x < this.r { this.x = float(this.r); this.vx = -this.vx }
+        if this.x > largura - this.r { this.x = float(largura - this.r); this.vx = -this.vx }
+        if this.y > chao - this.r {
+            this.y = float(chao - this.r)
+            this.vy = -this.vy * 0.92
+            if this.vy > -6.0 { this.vy = -18.0 }
+        }
+    }
+
+    desenhar(t) {
+        t.circulo(this.x + 6, this.y + 8, this.r, tela.rgba(0, 0, 0, 70))      // sombra
+        t.circulo(this.x, this.y, this.r, this.cor)
+        t.circulo(this.x - this.r / 3, this.y - this.r / 3, this.r / 3, tela.rgba(255, 255, 255, 110))
+    }
+}
+
+// Paisagem estática: céu, sol, estrelas, montanhas, chão e título.
+fn desenharFundo(t, s) {
+    const w = t.largura
+    const h = t.altura
+    const chao = h * 4 / 5
+    t.degrade(0, 0, w, chao, 0x0B1026, 0xF27D52)
+    for i in 0..120 {
+        t.ponto(tela.random(w), tela.random(chao / 2), tela.rgba(255, 255, 255, 80 + tela.random(170)))
+    }
+    // sol com brilho
+    const sx = w * 3 / 4
+    const sy = chao - 140 * s
+    for i in 0..6 {
+        t.circulo(sx, sy, (160 + i * 40) * s, tela.rgba(255, 200, 120, 22))
+    }
+    t.circulo(sx, sy, 130 * s, 0xFFD27F)
+    // montanhas
+    t.triangulo(-200 * s, chao, 420 * s, h * 0.30, 1000 * s, chao, 0x2B2D52)
+    t.triangulo(600 * s, chao, 1150 * s, h * 0.38, 1800 * s, chao, 0x3A3B6B)
+    t.triangulo(1300 * s, chao, 1750 * s, h * 0.45, 2300 * s, chao, 0x2B2D52)
+    t.triangulo(320 * s, h * 0.38, 420 * s, h * 0.30, 520 * s, h * 0.38, 0xE8E8F5)
+    // chão
+    t.degrade(0, chao, w, h - chao, 0x1E3B2F, 0x0E1A15)
+    for i in 0..12 {
+        const x = i * w / 11
+        t.linha(w / 2, chao, x * 2 - w / 2, h, tela.rgba(255, 255, 255, 25), 2)
+    }
+    // título
+    t.fonte("Segoe UI", true)
+    t.textoCentro(w / 2 + 4, 60 * s + 4, "Fogu + HDMI", tela.rgba(0, 0, 0, 120), 110 * s)
+    t.textoCentro(w / 2, 60 * s, "Fogu + HDMI", 0xFFFFFF, 110 * s)
+    t.fonte("Segoe UI", false)
+    t.textoCentro(w / 2, 200 * s, "desenhado em Fogu, direto no monitor HDMI", 0xFFE3C4, 36 * s)
+}
+
+fn painel(t, s, mon, fps, quadros) {
+    const x = 40 * s
+    const y = t.altura - 190 * s
+    t.arredondado(x, y, 560 * s, 150 * s, 24 * s, tela.rgba(0, 0, 0, 140))
+    let nome = mon.name
+    if nome == "" { nome = mon.device }
+    t.texto(x + 24 * s, y + 18 * s, `${nome} · ${mon.output} · ${t.largura}x${t.altura}`, 0xFFFFFF, 30 * s)
+    t.texto(x + 24 * s, y + 62 * s, `${fps} fps · quadro ${quadros}`, 0xB8F5C8, 28 * s)
+    t.texto(x + 24 * s, y + 102 * s, "Esc ou Q para sair · espaço: mais bolas", 0xC8C8E0, 24 * s)
+}
+
+// Relógio analógico (as funções trigonométricas vêm da lib nativa).
+fn relogio(t, s, cx, cy, r) {
+    const agora = tela.horaLocal() / 1000
+    t.circulo(cx, cy, r, tela.rgba(255, 255, 255, 40))
+    t.anel(cx, cy, r, 0xFFFFFF, 4 * s)
+    for i in 0..12 {
+        const a = i * tela.PI / 6
+        t.linha(cx + tela.sin(a) * r * 0.82, cy - tela.cos(a) * r * 0.82, cx + tela.sin(a) * r * 0.94, cy - tela.cos(a) * r * 0.94, 0xFFFFFF, 3 * s)
+    }
+    const seg = agora % 60
+    const min = agora / 60 % 60
+    const hor = agora / 3600 % 12
+    const ah = (hor + min / 60.0) * tela.PI / 6
+    const am = (min + seg / 60.0) * tela.PI / 30
+    const asg = seg * tela.PI / 30
+    t.linha(cx, cy, cx + tela.sin(ah) * r * 0.5, cy - tela.cos(ah) * r * 0.5, 0xFFFFFF, 8 * s)
+    t.linha(cx, cy, cx + tela.sin(am) * r * 0.75, cy - tela.cos(am) * r * 0.75, 0xFFFFFF, 5 * s)
+    t.linha(cx, cy, cx + tela.sin(asg) * r * 0.85, cy - tela.cos(asg) * r * 0.85, 0xFF5A5A, 2 * s)
+    t.circulo(cx, cy, 7 * s, 0xFF5A5A)
+}
+
+fn main() {
+    print("telas conectadas:")
+    for c in tela.conectados()? {
+        let estado = "inativa"
+        if c.active { estado = "ativa" }
+        print(`  ${c.name} [${c.output}] ${estado}`)
+    }
+    acordarTv()
+
+    const t = tela.abrir()?
+    const mon = t.monitor
+    print(`desenhando em ${mon.device} (${mon.name}, ${mon.output}) ${t.largura}x${t.altura}`)
+    if t.restaurar != nil { print(`HDMI ativado (estender); volta para "${t.restaurar}" ao sair`) }
+
+    const s = t.altura / 1080.0          // escala: o desenho foi pensado para 1080p
+    const chao = t.altura * 4 / 5
+    desenharFundo(t, s)
+    t.guardarFundo()?
+
+    const bolas = []
+    for i in 0..8 { bolas.push(new Bola(t.largura, chao, i)) }
+
+    const segundos = float(opcao("--segundos", "0"))
+    const foto = opcao("--foto", "")
+    const inicio = time.monotonic()
+    let quadros = 0
+    let fps = 0
+    let marca = inicio
+    let contados = 0
+
+    while t.aberta() {
+        // todas as teclas do quadro de uma vez (nenhuma se perde entre quadros)
+        let sair = false
+        for k in t.teclas() {
+            if k == tela.teclas.espaco { bolas.push(new Bola(t.largura, chao, len(bolas))) }
+            if k == 81 { sair = true }        // Q
+        }
+        if sair { break }
+
+        t.fundo()?
+        for b in bolas {
+            b.passo(t.largura, chao)
+            b.desenhar(t)
+        }
+        relogio(t, s, t.largura - 170 * s, t.altura - 170 * s, 120 * s)
+        painel(t, s, mon, fps, quadros)
+        t.mostrar()?
+
+        quadros += 1
+        contados += 1
+        const agora = time.monotonic()
+        if agora - marca >= 1.0 {
+            fps = contados
+            contados = 0
+            marca = agora
+        }
+        if quadros == 30 && foto != "" {
+            t.salvar(foto)?
+            print(`foto salva em ${foto}`)
+        }
+        if segundos > 0.0 && agora - inicio >= segundos { break }
+        time.sleep(0.010)
+    }
+    print(`${quadros} quadros em ${time.monotonic() - inicio} s`)
+    t.fechar()?
+    return true, nil
+}
+
+const [_ok, err] = main()
+if err != nil { print(`erro: ${err.message}`) }

@@ -1,0 +1,16 @@
+// _lib.fg — a lib nativa foguhdmi, compartilhada por tela.fg e som.fg.
+//
+// Uma instância só: o sink (callback de saída) é global dentro da DLL, então
+// os dois módulos precisam usar o mesmo Native. Cada um declara as funções
+// que usa com native.declare(...). O hdmi depende de APIs do Windows (DXGI,
+// GDI, WASAPI, SAPI): em outros sistemas load() devolve um erro claro.
+import { Native } from "./_native.fg"
+
+export const native = new Native("hdmi", "foguhdmi", "fhd", {
+    fhd_version: [["buffer", "i64"], "i64"],
+    fhd_last_error: [["buffer", "i64"], "i64"],
+    fhd_set_sink: [["ptr"], "i32"],
+}, "FOGU_HDMI_LIB", ["windows"])
+
+// O que foi detectado e carregado: { platform, os, file, path, loaded, error }.
+export fn info() { return native.info() }

@@ -1,0 +1,255 @@
+// som.fg — áudio para o HDMI (ou qualquer saída de som) e texto para fala,
+// sobre a lib Rust foguhdmi via fogu:ffi. Windows.
+//
+//   import som from "./som.fg"
+//   const f = som.falar("Olá! Isto sai pela TV.", { voz: "pt" })?
+//   f.esperar()
+//   const m = som.tocar("musica.mp3", { volume: 80 })?    // wav, mp3, m4a, wma, flac…
+//   while m.tocando() { print(m.posicao(), "/", m.duracao()) ... }
+//   (som.tom(440, 500)?).esperar()                         // bip de 440 Hz por 0,5 s
+//   som.fechar()                                           // restaura o modo de projeção
+//
+// Por padrão o som vai para a saída de áudio do monitor/TV (HDMI). Se ela
+// não existir porque o Windows está em "Somente tela do PC", a tela é
+// estendida para o HDMI (como em tela.abrir) e som.fechar() desfaz.
+// Outras saídas: { dispositivo: "padrao" } ou parte do nome ("Realtek").
+import _lib from "./_lib.fg"
+import { waitLoop } from "./_native.fg"
+import time from "fogu:time"
+import tela from "./tela.fg"
+
+let _restaurar = nil
+
+const _SIGNATURES = {
+    fhd_sound_wait: [["i64", "i64"], "i64"],
+    fhd_last_error: [["buffer", "i64"], "i64"],
+    fhd_audio_devices: [["buffer", "i64"], "i64"],
+    fhd_voices: [["buffer", "i64"], "i64"],
+    fhd_say: [["str", "str", "str", "i64", "i64", "i64"], "i64"],
+    fhd_tts_save: [["str", "str", "i64", "str", "i64"], "i32"],
+    fhd_play: [["str", "str", "i64", "i64"], "i64"],
+    fhd_tone: [["str", "i64", "i64", "i64"], "i64"],
+    fhd_sound_info: [["i64", "i64"], "i64"],
+    fhd_sound_error: [["i64", "buffer", "i64"], "i64"],
+    fhd_sound_volume: [["i64", "i64"], "i32"],
+    fhd_sound_stop: [["i64"], "i32"],
+    fhd_audio_level: [["str", "i64"], "i64"],
+    fhd_audio_set_level: [["str", "i64", "i64"], "i32"],
+}
+
+// A lib nativa é compartilhada com o outro módulo (veja _lib.fg).
+const _native = _lib.native
+_native.declare(_SIGNATURES)
+const _fn = _native.api
+
+// No import: reconhece o sistema (o hdmi é só Windows) e a arquitetura e já
+// carrega native/<so>-<arch>/foguhdmi.dll. Se faltar, o erro volta na primeira chamada.
+_native.autoload()
+
+// O que foi detectado e carregado: { platform, os, file, path, loaded, error }.
+export fn nativeInfo() { return _native.info() }
+
+// Carrega a biblioteca nativa (native/<plataforma>/foguhdmi.dll, native/foguhdmi.dll,
+// o build do cargo ou FOGU_HDMI_LIB). `path` força um arquivo ou pasta.
+export fn load(path = nil) {
+    return _native.load(path)
+}
+
+fn _last_error() { return _native.lastError() }
+
+fn _status(rc) { return _native.status(rc) }
+
+// Saídas da lib: chegam inteiras pelo callback (sink), sem buffer fixo e sem
+// a segunda chamada quando não cabiam. cap é ignorado (compatibilidade).
+fn _text(f, cap = 0) { return _native.text(f) }
+
+fn _json(f) { return _native.json(f) }
+
+// Saídas de som ativas: [{ id, name, display, default }].
+// display = áudio de monitor/TV (HDMI ou DisplayPort).
+export fn dispositivos() {
+    load()?
+    return _json((b, n) => _fn.fhd_audio_devices(b, n))
+}
+
+// Vozes instaladas: [{ id, name, language }] (ex.: "Microsoft Helia", "pt-PT").
+export fn vozes() {
+    load()?
+    return _json((b, n) => _fn.fhd_voices(b, n))
+}
+
+// A saída de áudio do HDMI, ou nil.
+export fn saidaHdmi() {
+    for d in dispositivos()? {
+        if d.display { return d, nil }
+    }
+    return nil, nil
+}
+
+// Resolve { dispositivo } para o id do Windows:
+//   "hdmi" (padrão) · "padrao" · parte do nome · id completo.
+fn _dispositivo(opts) {
+    const want = opts.get("dispositivo") ?? "hdmi"
+    if want == "padrao" || want == "" { return "", nil }
+    if want == "hdmi" {
+        let d = saidaHdmi()?
+        if d == nil && (opts.get("ativar") ?? true) {
+            const antes = tela.ativarHdmi()?
+            if antes != nil && _restaurar == nil { _restaurar = antes }
+            // o áudio do HDMI aparece um pouco depois da imagem
+            const fim = time.monotonic() + 8.0
+            while d == nil && time.monotonic() < fim {
+                time.sleep(0.25)
+                d = saidaHdmi()?
+            }
+        }
+        if d == nil { return nil, error("nenhuma saída de áudio HDMI (o monitor/TV está ligado no HDMI?)") }
+        return d.id, nil
+    }
+    const lower = want.lower()
+    for d in dispositivos()? {
+        if d.id == want || d.name.lower().contains(lower) { return d.id, nil }
+    }
+    let nomes = []
+    for d in dispositivos()? { nomes.push(d.name) }
+    return nil, error(`saída de som '${want}' não encontrada; há: ${nomes.join(", ")}`)
+}
+
+// falar(texto, { dispositivo = "hdmi", voz, velocidade = 0, volume = 100, ssml = false })
+//   voz: parte do nome ("Helia"), idioma ("pt", "pt-PT", "en") ou id; sem voz: a padrão.
+//   velocidade: -10 (lento) a 10 (rápido). volume: 0 a 400 (%).
+//   ssml: o texto tem marcação (<emph>, <rate>, <silence msec="500"/>…).
+// Volta logo, com o som tocando; .esperar() espera terminar.
+export fn falar(texto, opts = {}) {
+    load()?
+    const dev = _dispositivo(opts)?
+    let flags = 0
+    if opts.get("ssml") ?? false { flags = 1 }
+    const h = _fn.fhd_say(dev, `${texto}`, opts.get("voz") ?? "", opts.get("velocidade") ?? 0, opts.get("volume") ?? 100, flags)
+    if h < 0 { return nil, _last_error() }
+    return new Som(h, "fala"), nil
+}
+
+// Grava a fala em .wav, .mp3 ou .m4a, pela extensão (mesmas opções de voz/velocidade/ssml).
+export fn gravarFala(texto, caminho, opts = {}) {
+    load()?
+    let flags = 0
+    if opts.get("ssml") ?? false { flags = 1 }
+    return _status(_fn.fhd_tts_save(`${texto}`, opts.get("voz") ?? "", opts.get("velocidade") ?? 0, caminho, flags))
+}
+
+// tocar(caminho, { dispositivo = "hdmi", volume = 100, repetir = false })
+// Formatos: wav, mp3, m4a/aac, wma, flac (os que o Windows decodifica).
+export fn tocar(caminho, opts = {}) {
+    load()?
+    const dev = _dispositivo(opts)?
+    let rep = 0
+    if opts.get("repetir") ?? false { rep = 1 }
+    const h = _fn.fhd_play(dev, caminho, opts.get("volume") ?? 100, rep)
+    if h < 0 { return nil, _last_error() }
+    return new Som(h, caminho), nil
+}
+
+// Tom senoidal: tom(frequencia_hz, duracao_ms, { dispositivo, volume })
+export fn tom(freq, ms = 300, opts = {}) {
+    load()?
+    const dev = _dispositivo(opts)?
+    const h = _fn.fhd_tone(dev, int(freq), int(ms), opts.get("volume") ?? 100)
+    if h < 0 { return nil, _last_error() }
+    return new Som(h, `tom ${freq} Hz`), nil
+}
+
+// Volume do Windows da saída: { volume: 0..100, mudo: bool }.
+//   volumeSistema({ dispositivo = "hdmi" })
+export fn volumeSistema(opts = {}) {
+    load()?
+    const dev = _dispositivo(opts)?
+    const v = _fn.fhd_audio_level(dev, 0)
+    if v < 0 { return nil, _last_error() }
+    return { volume: v, mudo: _fn.fhd_audio_level(dev, 1) == 1 }, nil
+}
+
+// Muda o volume do Windows da saída e/ou tira o mudo.
+//   setVolumeSistema(80, { dispositivo = "hdmi", mudo = false })
+export fn setVolumeSistema(volume, opts = {}) {
+    load()?
+    const dev = _dispositivo(opts)?
+    let m = -1
+    if opts.get("mudo") != nil {
+        m = 0
+        if opts.mudo { m = 1 }
+    }
+    let v = -1
+    if volume != nil { v = int(volume) }
+    return _status(_fn.fhd_audio_set_level(dev, v, m))
+}
+
+// Pico do sinal que está saindo agora pela saída (0.0 a 1.0), depois do
+// volume do Windows — o mesmo medidor das configurações de som.
+export fn pico(opts = {}) {
+    load()?
+    const dev = _dispositivo(opts)?
+    const p = _fn.fhd_audio_level(dev, 2)
+    if p < 0 { return nil, _last_error() }
+    return p / 1000.0, nil
+}
+
+// Desfaz a ativação do HDMI feita por falar/tocar/tom (se houve).
+export fn fechar() {
+    if _restaurar != nil {
+        tela.setTopologia(_restaurar)
+        _restaurar = nil
+    }
+    return true, nil
+}
+
+export struct Som {
+    handle = 0
+    nome = ""
+
+    new(handle, nome) {
+        this.handle = handle
+        this.nome = nome
+    }
+
+    tocando() {
+        if this.handle == 0 { return false }
+        return _fn.fhd_sound_info(this.handle, 0) == 1
+    }
+    // Posição e duração em milissegundos (duração -1 se desconhecida).
+    posicao() { return _fn.fhd_sound_info(this.handle, 1) }
+    duracao() { return _fn.fhd_sound_info(this.handle, 2) }
+    // 0 a 400 (%), muda enquanto toca.
+    volume(v) { return _status(_fn.fhd_sound_volume(this.handle, int(v))) }
+
+    // Espera terminar (ou o tempo máximo, em segundos) e libera o som.
+    esperar(maximo = 0.0) {
+        if this.handle == 0 { return true, nil }
+        // A lib espera o fim do som (acorda em ~2 ms, sem sleep(0.02) aqui),
+        // em fatias: as outras tarefas fg continuam rodando.
+        let total = -1
+        if maximo > 0.0 { total = int(maximo * 1000.0) }
+        const h = this.handle
+        waitLoop(total, (slice) => {
+            const r = _fn.fhd_sound_wait(h, slice)
+            if r < 0 { return nil, _last_error() }
+            if r == 1 { return true, nil }
+            return nil, nil
+        })?
+        let err = nil
+        if _fn.fhd_sound_info(this.handle, 5) == 1 {
+            err = error(_text((b, n) => _fn.fhd_sound_error(this.handle, b, n))?)
+        }
+        this.parar()
+        if err != nil { return nil, err }
+        return true, nil
+    }
+
+    // Para agora e libera o som.
+    parar() {
+        if this.handle == 0 { return true, nil }
+        const rc = _fn.fhd_sound_stop(this.handle)
+        this.handle = 0
+        return _status(rc)
+    }
+}

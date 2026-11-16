@@ -1,0 +1,146 @@
+// HTML no monitor HDMI, de dois jeitos:
+//
+//   fogu run html.fg               canvas: o HTML é renderizado (Chrome/Edge
+//                                  sem janela) e desenhado no canvas, misturado
+//                                  com desenho Fogu; atualiza a cada segundo
+//   fogu run html.fg --ao-vivo     navegador em quiosque no HDMI: HTML/CSS/JS
+//                                  ao vivo, com o Fogu mudando a página
+//
+//   --segundos N   fecha sozinho depois de N segundos
+//   --foto x.bmp   (modo canvas) salva o primeiro quadro
+import tela from "./tela.fg"
+import time from "fogu:time"
+
+fn opcao(nome, padrao) {
+    const args = Fogu.args
+    for i, a in args {
+        if a == nome && i + 1 < len(args) { return args[i + 1] }
+        if a == nome { return "sim" }
+    }
+    return padrao
+}
+
+fn doisDigitos(n) {
+    if n < 10 { return `0${n}` }
+    return `${n}`
+}
+
+fn relogioTexto() {
+    const s = tela.horaLocal() / 1000
+    return `${doisDigitos(s / 3600)}:${doisDigitos(s / 60 % 60)}:${doisDigitos(s % 60)}`
+}
+
+// Um painel em HTML/CSS: degradê, cartões, SVG e fonte do sistema.
+fn painelHtml(n, cpu) {
+    let barras = ""
+    for i, v in cpu {
+        barras += `<div class="bar" style="height:${v}%"><span>${v}</span></div>`
+    }
+    return `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  * { box-sizing: border-box; margin: 0 }
+  body { font-family: "Segoe UI", sans-serif; color: #f1f5f9; height: 100vh; padding: 48px;
+         background: radial-gradient(circle at 20% 20%, #1e3a8a, #0f172a 60%); }
+  h1 { font-size: 64px; font-weight: 700; letter-spacing: -1px }
+  h1 small { font-size: 28px; color: #93c5fd; font-weight: 400; margin-left: 16px }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; margin-top: 40px }
+  .card { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.15);
+          border-radius: 24px; padding: 28px; }
+  .card h2 { font-size: 22px; color: #cbd5e1; font-weight: 500 }
+  .card .v { font-size: 72px; font-weight: 700; margin-top: 8px }
+  .ok { color: #4ade80 } .warn { color: #facc15 }
+  .bars { display: flex; align-items: flex-end; gap: 10px; height: 260px; margin-top: 16px }
+  .bar { flex: 1; background: linear-gradient(#38bdf8, #6366f1); border-radius: 10px 10px 4px 4px;
+         position: relative; min-height: 6px }
+  .bar span { position: absolute; top: -28px; width: 100%; text-align: center; font-size: 18px }
+  .wide { grid-column: span 2 }
+</style></head><body>
+  <h1>Painel em HTML <small>renderizado pelo Fogu no HDMI</small></h1>
+  <div class="grid">
+    <div class="card"><h2>Hora</h2><div class="v">${relogioTexto()}</div></div>
+    <div class="card"><h2>Atualizações</h2><div class="v ok">${n}</div></div>
+    <div class="card"><h2>Status</h2><div class="v warn">● ativo</div></div>
+    <div class="card wide"><h2>Carga (simulada)</h2><div class="bars">${barras}</div></div>
+    <div class="card"><h2>SVG</h2>
+      <svg viewBox="0 0 100 100" width="100%" height="260">
+        <circle cx="50" cy="50" r="40" fill="none" stroke="#334155" stroke-width="12"/>
+        <circle cx="50" cy="50" r="40" fill="none" stroke="#f472b6" stroke-width="12"
+                stroke-dasharray="${n * 13 % 251} 251" transform="rotate(-90 50 50)" stroke-linecap="round"/>
+        <text x="50" y="57" text-anchor="middle" font-size="20" fill="#f1f5f9">${n * 13 % 251 * 100 / 251}%</text>
+      </svg>
+    </div>
+  </div>
+</body></html>`
+}
+
+fn cargaAleatoria() {
+    const v = []
+    for i in 0..12 { v.push(10 + tela.random(90)) }
+    return v
+}
+
+// ---------- modo canvas ----------
+
+fn modoCanvas(segundos, foto) {
+    const t = tela.abrir()?
+    print(`HTML no canvas: ${t.monitor.name} (${t.monitor.output}) ${t.largura}x${t.altura}`)
+    const inicio = time.monotonic()
+    let n = 0
+    while t.aberta() {
+        if t.tecla() == 81 { break }
+        const t0 = time.monotonic()
+        t.html(painelHtml(n, cargaAleatoria()))?
+        const ms = int((time.monotonic() - t0) * 1000)
+        // desenho Fogu por cima do HTML
+        const s = t.altura / 1080.0
+        const cx = t.largura - 120 * s
+        const cy = 110 * s
+        const a = n * tela.PI / 15
+        t.anel(cx, cy, 60 * s, 0xFFFFFF, 4 * s)
+        t.linha(cx, cy, cx + tela.sin(a) * 50 * s, cy - tela.cos(a) * 50 * s, 0xF472B6, 6 * s)
+        t.arredondado(40 * s, t.altura - 80 * s, 520 * s, 50 * s, 16 * s, tela.rgba(0, 0, 0, 150))
+        t.texto(60 * s, t.altura - 72 * s, `HTML renderizado em ${ms} ms · Esc/Q sai`, 0xFFFFFF, 26 * s)
+        t.mostrar()?
+        if n == 0 && foto != "" {
+            t.salvar(foto)?
+            print(`foto salva em ${foto}`)
+        }
+        n += 1
+        if segundos > 0.0 && time.monotonic() - inicio >= segundos { break }
+        // espera ~1 s, mas continua respondendo ao Esc
+        const fim = time.monotonic() + 1.0
+        while time.monotonic() < fim && t.aberta() { time.sleep(0.05) }
+    }
+    tela.fecharHtml()
+    t.fechar()?
+    return true, nil
+}
+
+// ---------- modo ao vivo ----------
+
+fn modoAoVivo(segundos) {
+    const nav = tela.navegador({ html: painelHtml(0, cargaAleatoria()) })?
+    print(`navegador em quiosque no ${nav.monitor.name} (${nav.monitor.output}); Alt+F4 ou --segundos para sair`)
+    const inicio = time.monotonic()
+    let n = 1
+    while segundos <= 0.0 || time.monotonic() - inicio < segundos {
+        time.sleep(1.0)
+        // o Fogu troca a página inteira...
+        const [_r, err] = nav.html(painelHtml(n, cargaAleatoria()))
+        if err != nil { break }                       // navegador fechado
+        // ...ou mexe nela com JavaScript
+        nav.js(`document.querySelector("h1 small").textContent = "ao vivo no navegador · atualização ${n}"`)
+        n += 1
+    }
+    nav.fechar()
+    return true, nil
+}
+
+fn main() {
+    const segundos = float(opcao("--segundos", "0"))
+    if opcao("--ao-vivo", "") != "" { return modoAoVivo(segundos) }
+    return modoCanvas(segundos, opcao("--foto", ""))
+}
+
+const [_ok, err] = main()
+if err != nil { print(`erro: ${err.message}`) }

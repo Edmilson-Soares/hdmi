@@ -1,0 +1,118 @@
+// Testes do tela.fg. Precisam da lib nativa (fogu run build:native).
+// Usam um canvas fora da tela: não abrem janela nem mexem nos monitores.
+//   fogu test
+import { test, skip, expect } from "fogu:test"
+import image from "fogu:image"
+import webview from "fogu:webview"
+import tela from "./tela.fg"
+import fs from "fogu:fs"
+
+test("carrega a lib nativa", (): error => {
+    expect(tela.version()?).toBe("0.1.0")
+    return nil
+})
+
+test("cores", (): error => {
+    expect(tela.rgb(255, 136, 0)).toBe(0xFF8800)
+    expect(tela.hex("#ff8800")).toBe(0xFF8800)
+    expect(tela.hex("00FF00")).toBe(0x00FF00)
+    expect(tela.hsv(0)).toBe(0xFF0000)
+    expect(tela.hsv(120)).toBe(0x00FF00)
+    expect(tela.hsv(240)).toBe(0x0000FF)
+    expect(tela.mix(0x000000, 0xFFFFFF, 0.5)).toBe(0x7F7F7F)
+    expect(tela.rgba(0, 0, 0, 0)).toBe(4294967296)
+    return nil
+})
+
+test("matemática nativa", (): error => {
+    expect(tela.sin(0)).toBe(0.0)
+    expect(tela.cos(0)).toBe(1.0)
+    expect(tela.sqrt(16)).toBe(4.0)
+    for i in 0..100 {
+        const r = tela.random(10)
+        expect(r >= 0 && r < 10).toBe(true)
+    }
+    const h = tela.horaLocal()
+    expect(h >= 0 && h < 86400000).toBe(true)
+    return nil
+})
+
+test("lista monitores e telas conectadas", (): error => {
+    const mons = tela.monitores()?
+    expect(len(mons) > 0).toBe(true)
+    let principal = 0
+    for m in mons { if m.primary { principal += 1 } }
+    expect(principal).toBe(1)
+    expect(len(tela.conectados()?) >= len(mons)).toBe(true)
+    return nil
+})
+
+test("desenha num canvas e salva BMP", (): error => {
+    const c = tela.canvas(200, 100)?
+    expect(c.largura).toBe(200)
+    expect(c.altura).toBe(100)
+    c.limpar(0x102030)?
+    c.degrade(0, 0, 200, 100, 0x000000, 0xFFFFFF)?
+    c.retangulo(10, 10, 50, 30, 0xFF0000)?
+    c.moldura(5, 5, 190, 90, 0x00FF00, 2)?
+    c.arredondado(70, 10, 60, 40, 10, tela.rgba(0, 0, 255, 128))?
+    c.linha(0, 0, 199, 99, 0xFFFF00, 3)?
+    c.circulo(150, 60, 25, 0xFF8800)?
+    c.anel(150, 60, 30, 0xFFFFFF, 2)?
+    c.triangulo(20, 90, 40, 50, 60, 90, 0x00FFFF)?
+    c.fonte("Segoe UI", true)?
+    c.texto(10, 60, "Fogu", 0xFFFFFF, 20)?
+    const m = c.medir("Fogu", 20)
+    expect(m.largura > 10).toBe(true)
+    expect(m.altura >= 20).toBe(true)
+    c.guardarFundo()?
+    c.limpar(0)?
+    c.fundo()?
+    c.salvar("out/test_canvas.bmp")?
+    expect(fs.exists("out/test_canvas.bmp")).toBe(true)
+    c.fechar()?
+    const [_r, err] = c.limpar(0)
+    expect(err.message).toContain("invalid screen handle")
+    return nil
+})
+
+test("monitor inexistente dá erro", (): error => {
+    const [t, err] = tela.abrir({ monitor: 99 })
+    expect(t).toBe(nil)
+    expect(err.message).toContain("não existe")
+    return nil
+})
+
+test("desenha imagens do fogu:image", (): error => {
+    const img = image.new(4, 2, "#ff8800")
+    img.setPixel(0, 0, "#0000ff")
+    const c = tela.canvas(20, 20)?
+    c.limpar(0)?
+    c.imagem(img, 1, 1)?
+    c.imagem(img, 0, 10, 20, 10)?            // ampliada
+    c.salvar("out/test_imagem.bmp")?
+    const out = image.open("out/test_imagem.bmp")?
+    expect(out.getPixel(1, 1)).toContain("0000ff")
+    expect(out.getPixel(3, 1)).toContain("ff8800")
+    expect(out.getPixel(19, 19)).toContain("ff8800")
+    expect(out.getPixel(0, 0)).toContain("000000")
+    c.fechar()?
+    return nil
+})
+
+// Precisa de Chrome, Edge, Chromium ou Brave instalado.
+let comNavegador = skip
+if webview.find() != nil { comNavegador = test }
+
+comNavegador("renderiza HTML no canvas", (): error => {
+    const c = tela.canvas(200, 100)?
+    c.limpar(0)?
+    c.html("<body style='margin:0;background:#00ff00'></body>", { x: 0, y: 0, largura: 100, altura: 100 })?
+    c.salvar("out/test_html.bmp")?
+    tela.fecharHtml()
+    const out = image.open("out/test_html.bmp")?
+    expect(out.getPixel(50, 50)).toContain("00ff00")
+    expect(out.getPixel(150, 50)).toContain("000000")
+    c.fechar()?
+    return nil
+})

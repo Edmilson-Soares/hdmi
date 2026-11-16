@@ -1,0 +1,543 @@
+// tela.fg — desenhar num monitor (o da porta HDMI, por padrão) a partir do
+// Fogu, sobre a lib Rust foguhdmi via fogu:ffi. Windows.
+//
+//   import tela from "./tela.fg"
+//   const t = tela.abrir()?                     // tela cheia no monitor HDMI
+//   t.limpar(tela.rgb(10, 20, 40))
+//   t.circulo(t.largura / 2, t.altura / 2, 200, 0xFF8800)
+//   t.texto(40, 40, "Olá, HDMI!", 0xFFFFFF, 64)
+//   t.mostrar()                                 // envia o quadro para o monitor
+//   while t.aberta() { time.sleep(0.05) }       // Esc fecha
+//   t.fechar()
+//
+// Cores: 0xRRGGBB (opaca) ou tela.rgba(r, g, b, a) para transparência.
+//
+// HTML: t.html("<h1>oi</h1>", { x, y, largura, altura }) renderiza a página
+// num Chrome/Edge sem janela (fogu:webview) e desenha o resultado no canvas,
+// junto com o resto do desenho. tela.navegador() abre o navegador em modo
+// quiosque, em tela cheia no monitor HDMI, para HTML/CSS/JS ao vivo.
+import _lib from "./_lib.fg"
+import json from "fogu:json"
+import time from "fogu:time"
+import image from "fogu:image"
+import webview from "fogu:webview"
+
+const _SIGNATURES = {
+    fhd_keys: [["i64", "buffer", "i64"], "i64"],
+    fhd_version: [["buffer", "i64"], "i64"],
+    fhd_last_error: [["buffer", "i64"], "i64"],
+    fhd_monitors: [["buffer", "i64"], "i64"],
+    fhd_connected: [["buffer", "i64"], "i64"],
+    fhd_topology: [[], "i64"],
+    fhd_set_topology: [["i64"], "i32"],
+    fhd_open: [["i64", "i64", "i64", "str"], "i64"],
+    fhd_canvas: [["i64", "i64"], "i64"],
+    fhd_close: [["i64"], "i32"],
+    fhd_width: [["i64"], "i64"],
+    fhd_height: [["i64"], "i64"],
+    fhd_is_open: [["i64"], "i32"],
+    fhd_key: [["i64"], "i64"],
+    fhd_mouse: [["i64", "i64"], "i64"],
+    fhd_present: [["i64"], "i32"],
+    fhd_clear: [["i64", "i64"], "i32"],
+    fhd_pixel: [["i64", "i64", "i64", "i64"], "i32"],
+    fhd_rect: [["i64", "i64", "i64", "i64", "i64", "i64", "i64"], "i32"],
+    fhd_round_rect: [["i64", "i64", "i64", "i64", "i64", "i64", "i64"], "i32"],
+    fhd_line: [["i64", "i64", "i64", "i64", "i64", "i64", "i64"], "i32"],
+    fhd_circle: [["i64", "i64", "i64", "i64", "i64", "i64"], "i32"],
+    fhd_triangle: [["i64", "i64", "i64", "i64", "i64", "i64", "i64", "i64"], "i32"],
+    fhd_gradient: [["i64", "i64", "i64", "i64", "i64", "i64", "i64", "i64"], "i32"],
+    fhd_font: [["i64", "str", "i64"], "i32"],
+    fhd_text: [["i64", "i64", "i64", "str", "i64", "i64"], "i32"],
+    fhd_text_size: [["i64", "str", "i64", "i64"], "i64"],
+    fhd_save: [["i64", "str"], "i32"],
+    fhd_image: [["i64", "str", "i64", "i64", "i64", "i64"], "i32"],
+    fhd_store: [["i64"], "i32"],
+    fhd_recall: [["i64"], "i32"],
+    fhd_sin: [["f64"], "f64"],
+    fhd_cos: [["f64"], "f64"],
+    fhd_sqrt: [["f64"], "f64"],
+    fhd_random: [["i64"], "i64"],
+    fhd_local_millis: [[], "i64"],
+}
+
+// A lib nativa é compartilhada com o outro módulo (veja _lib.fg).
+const _native = _lib.native
+_native.declare(_SIGNATURES)
+const _fn = _native.api
+
+// No import: reconhece o sistema (o hdmi é só Windows) e a arquitetura e já
+// carrega native/<so>-<arch>/foguhdmi.dll. Se faltar, o erro volta na primeira chamada.
+_native.autoload()
+
+// O que foi detectado e carregado: { platform, os, file, path, loaded, error }.
+export fn nativeInfo() { return _native.info() }
+
+// Carrega a biblioteca nativa (native/<plataforma>/foguhdmi.dll, native/foguhdmi.dll,
+// o build do cargo ou FOGU_HDMI_LIB). `path` força um arquivo ou pasta.
+export fn load(path = nil) {
+    return _native.load(path)
+}
+
+fn _last_error() { return _native.lastError() }
+
+fn _status(rc) { return _native.status(rc) }
+
+// Saídas da lib: chegam inteiras pelo callback (sink), sem buffer fixo e sem
+// a segunda chamada quando não cabiam. cap é ignorado (compatibilidade).
+fn _text(f, cap = 0) { return _native.text(f) }
+
+fn _json(f) { return _native.json(f) }
+
+// ---------- cores e matemática ----------
+
+// 0xRRGGBB (operadores de bits do Fogu 0.7.4; cada canal fica em 0..255).
+export fn rgb(r, g, b) { return (int(r) & 0xFF) << 16 | (int(g) & 0xFF) << 8 | (int(b) & 0xFF) }
+
+// Cor com transparência (a: 0 = invisível, 255 = opaca): bit 32 marca "tem
+// alfa", depois AARRGGBB.
+export fn rgba(r, g, b, a) { return 1 << 32 | (int(a) & 0xFF) << 24 | rgb(r, g, b) }
+
+// Os canais de uma cor opaca: [r, g, b].
+export fn channels(c) { return [c >> 16 & 0xFF, c >> 8 & 0xFF, c & 0xFF] }
+
+// "#ff8800" ou "ff8800" → 0xFF8800
+const _HEX = {
+    "0": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8, "9": 9,
+    "a": 10, "b": 11, "c": 12, "d": 13, "e": 14, "f": 15,
+}
+export fn hex(s) {
+    let n = 0
+    for ch in s.lower() {
+        const d = _HEX.get(ch)
+        if d != nil { n = n * 16 + d }
+    }
+    return n
+}
+
+// Mistura c1 → c2 (t de 0.0 a 1.0), cores opacas.
+export fn mix(c1, c2, t) {
+    const [r1, g1, b1] = channels(c1)
+    const [r2, g2, b2] = channels(c2)
+    return rgb(r1 + (r2 - r1) * t, g1 + (g2 - g1) * t, b1 + (b2 - b1) * t)
+}
+
+// Cor a partir de matiz (0..360), saturação e brilho (0.0..1.0).
+export fn hsv(h, s = 1.0, v = 1.0) {
+    let hh = float(h) % 360.0
+    if hh < 0.0 { hh += 360.0 }
+    const c = v * s
+    const k = hh / 60.0
+    let m2 = k % 2.0 - 1.0
+    if m2 < 0.0 { m2 = -m2 }
+    const x = c * (1.0 - m2)
+    let r = 0.0
+    let g = 0.0
+    let b = 0.0
+    if k < 1.0 { r = c; g = x }
+    else if k < 2.0 { r = x; g = c }
+    else if k < 3.0 { g = c; b = x }
+    else if k < 4.0 { g = x; b = c }
+    else if k < 5.0 { r = x; b = c }
+    else { r = c; b = x }
+    const m = v - c
+    return rgb((r + m) * 255.0, (g + m) * 255.0, (b + m) * 255.0)
+}
+
+export const PI = 3.141592653589793
+export fn sin(x) { load()?; return _fn.fhd_sin(float(x)) }
+export fn cos(x) { load()?; return _fn.fhd_cos(float(x)) }
+export fn sqrt(x) { load()?; return _fn.fhd_sqrt(float(x)) }
+// Inteiro aleatório em [0, n).
+export fn random(n) { load()?; return _fn.fhd_random(int(n)) }
+// Milissegundos desde a meia-noite, no fuso horário do Windows.
+export fn horaLocal() { load()?; return _fn.fhd_local_millis() }
+
+// Códigos de tecla (Windows virtual keys) para tela.tecla().
+export const teclas = {
+    espaco: 32, enter: 13, esquerda: 37, cima: 38, direita: 39, baixo: 40,
+    a: 65, d: 68, s: 83, w: 87, p: 80, r: 82,
+}
+
+// ---------- monitores ----------
+
+export fn version() {
+    load()?
+    return _text((b, n) => _fn.fhd_version(b, n))
+}
+
+// [{ index, name, device, output: "hdmi" | "displayport" | "internal" | …,
+//    hdmi, primary, x, y, width, height }]
+export fn monitores() {
+    load()?
+    const s = _text((b, n) => _fn.fhd_monitors(b, n))?
+    return json.parse(s)
+}
+
+// O primeiro monitor ligado por HDMI, ou nil.
+export fn monitorHdmi() {
+    for m in monitores()? {
+        if m.hdmi { return m, nil }
+    }
+    return nil, nil
+}
+
+// Telas fisicamente conectadas, ativas ou não:
+// [{ id, name, output, hdmi, active }]. Uma TV/monitor no HDMI com o Windows
+// em "Somente tela do PC" aparece aqui com active = false.
+export fn conectados() {
+    load()?
+    const s = _text((b, n) => _fn.fhd_connected(b, n))?
+    return json.parse(s)
+}
+
+const _TOPOLOGIAS = { interna: 1, duplicar: 2, estender: 4, externa: 8 }
+
+// Modo de projeção atual (Win+P): "interna" | "duplicar" | "estender" | "externa".
+export fn topologia() {
+    load()?
+    const t = _fn.fhd_topology()
+    for nome, v in _TOPOLOGIAS { if v == t { return nome, nil } }
+    return "desconhecida", nil
+}
+
+// Muda o modo de projeção, como Win+P.
+export fn setTopologia(nome) {
+    load()?
+    const v = _TOPOLOGIAS.get(nome)
+    if v == nil { return nil, error(`topologia inválida '${nome}' (interna, duplicar, estender, externa)`) }
+    return _status(_fn.fhd_set_topology(v))
+}
+
+// Liga a saída HDMI em modo "estender" se ela estiver conectada mas inativa.
+// Devolve a topologia anterior (para restaurar) ou nil se nada mudou.
+export fn ativarHdmi(espera = 8.0) {
+    let conectado = false
+    for c in conectados()? { if c.hdmi { conectado = true } }
+    if !conectado { return nil, nil }
+    // A topologia muda na hora; a lista de monitores leva um instante para
+    // acompanhar. Por isso a decisão é pela topologia.
+    const antes = topologia()?
+    if antes != "interna" && monitorHdmi()? != nil { return nil, nil }
+    let restaurar = nil
+    if antes != "estender" { restaurar = antes }
+    setTopologia("estender")?
+    const fim = time.monotonic() + espera
+    while time.monotonic() < fim {
+        time.sleep(0.25)
+        if monitorHdmi()? != nil {
+            time.sleep(0.5)                  // deixa o Windows assentar o novo modo
+            return restaurar, nil
+        }
+    }
+    if restaurar != nil { setTopologia(restaurar) }
+    return nil, error("a saída HDMI foi ativada mas o monitor não apareceu")
+}
+
+// ---------- tela ----------
+
+// abrir({ monitor = "hdmi" | índice, largura, altura, titulo, ativar = true })
+//   monitor: "hdmi" (padrão) procura a porta HDMI; se não houver, usa um
+//            monitor que não seja o principal, e por último o principal.
+//   ativar:  se o HDMI estiver conectado mas desligado no Windows ("Somente
+//            tela do PC"), passa para "estender"; fechar() restaura o modo.
+//   largura/altura: sem eles, tela cheia; com eles, uma janela desse tamanho
+//            centralizada no monitor.
+export fn abrir(opts = {}) {
+    load()?
+    const want = opts.get("monitor") ?? "hdmi"
+    let restaurar = nil
+    if want == "hdmi" && (opts.get("ativar") ?? true) {
+        restaurar = ativarHdmi()?
+    }
+    const mons = monitores()?
+    let mon = nil
+    if typeof(want) == "int" {
+        for m in mons { if m.index == want { mon = m } }
+        if mon == nil { return nil, error(`monitor ${want} não existe (${len(mons)} conectados)`) }
+    } else {
+        for m in mons { if mon == nil && m.hdmi { mon = m } }
+        for m in mons { if mon == nil && !m.primary { mon = m } }
+        if mon == nil && len(mons) > 0 { mon = mons[0] }
+        if mon == nil { return nil, error("nenhum monitor encontrado") }
+    }
+    const h = _fn.fhd_open(mon.index, opts.get("largura") ?? 0, opts.get("altura") ?? 0, opts.get("titulo") ?? "Fogu HDMI")
+    if h < 0 {
+        const err = _last_error()
+        if restaurar != nil { setTopologia(restaurar) }
+        return nil, err
+    }
+    const t = new Tela(h, mon)
+    t.restaurar = restaurar
+    return t, nil
+}
+
+// ---------- HTML ----------
+
+// Navegador sem janela compartilhado pelos t.html()/t.pagina() (aberto no
+// primeiro uso; a primeira renderização leva ~1 s, as seguintes ~50-150 ms).
+let _render = nil
+
+fn _renderPage(largura, altura) {
+    if _render == nil {
+        const b = webview.launch({ width: largura, height: altura })?
+        _render = { browser: b, page: b.open()?, w: 0, h: 0 }
+    }
+    if _render.w != largura || _render.h != altura {
+        _render.page.setViewport(largura, altura)?
+        _render.w = largura
+        _render.h = altura
+    }
+    return _render.page, nil
+}
+
+// Renderiza HTML numa imagem (fogu:image) largura x altura.
+export fn htmlImagem(html, largura, altura) {
+    const page = _renderPage(int(largura), int(altura))?
+    page.setContent(html)?
+    return page.screenshot()
+}
+
+// Renderiza uma URL (http://, https://, file:///) numa imagem.
+export fn paginaImagem(url, largura, altura, espera = nil) {
+    const page = _renderPage(int(largura), int(altura))?
+    page.goto(url)?
+    if espera != nil { page.waitFor(espera)? }
+    return page.screenshot()
+}
+
+// Fecha o navegador sem janela usado por t.html()/t.pagina().
+export fn fecharHtml() {
+    if _render != nil {
+        _render.browser.close()
+        _render = nil
+    }
+    return true, nil
+}
+
+// Navegador ao vivo em tela cheia (modo quiosque) no monitor HDMI: HTML,
+// CSS, animações e JavaScript rodando no próprio Chrome/Edge, controlado
+// pelo Fogu.
+//   navegador({ monitor = "hdmi" | índice, url, html, ativar = true })
+export fn navegador(opts = {}) {
+    const want = opts.get("monitor") ?? "hdmi"
+    let restaurar = nil
+    if want == "hdmi" && (opts.get("ativar") ?? true) {
+        restaurar = ativarHdmi()?
+    }
+    const mons = monitores()?
+    let mon = nil
+    if typeof(want) == "int" {
+        for m in mons { if m.index == want { mon = m } }
+    } else {
+        for m in mons { if mon == nil && m.hdmi { mon = m } }
+        for m in mons { if mon == nil && !m.primary { mon = m } }
+        if mon == nil && len(mons) > 0 { mon = mons[0] }
+    }
+    if mon == nil {
+        if restaurar != nil { setTopologia(restaurar) }
+        return nil, error(`monitor ${want} não encontrado`)
+    }
+    // Basta a janela começar dentro do monitor: o quiosque ocupa a tela toda.
+    const [b, err] = webview.launch({
+        headless: false,
+        width: mon.width / 2,
+        height: mon.height / 2,
+        args: [
+            "--kiosk",
+            `--window-position=${mon.x + mon.width / 4},${mon.y + mon.height / 4}`,
+            "--no-first-run",
+            "--disable-infobars",
+            "--disable-session-crashed-bubble",
+            "--autoplay-policy=no-user-gesture-required",
+        ],
+    })
+    if err != nil {
+        if restaurar != nil { setTopologia(restaurar) }
+        return nil, err
+    }
+    const nav = new Navegador(b, b.open()?, mon, restaurar)
+    // O webview fixa a área da página no width/height do launch; ajusta para o
+    // tamanho real da janela em quiosque (em pixels lógicos, já com a escala).
+    time.sleep(0.5)
+    const tam = nav.js("[outerWidth, outerHeight]")?
+    nav.page.setViewport(tam[0], tam[1])?
+    if opts.get("url") != nil { nav.ir(opts.url)? }
+    if opts.get("html") != nil { nav.html(opts.html)? }
+    return nav, nil
+}
+
+export struct Navegador {
+    browser = nil
+    page = nil
+    monitor = nil
+    restaurar = nil
+
+    new(browser, page, monitor, restaurar) {
+        this.browser = browser
+        this.page = page
+        this.monitor = monitor
+        this.restaurar = restaurar
+    }
+
+    // Troca o conteúdo da página por este HTML.
+    html(s) { return this.page.setContent(s) }
+    // Abre uma URL (http://, https://, file:///).
+    ir(url) { return this.page.goto(url) }
+    // Executa JavaScript na página e devolve o resultado.
+    js(codigo) { return this.page.eval(codigo) }
+    // Foto da página (fogu:image).
+    foto() { return this.page.screenshot() }
+
+    fechar() {
+        if this.browser != nil {
+            this.browser.close()
+            this.browser = nil
+        }
+        if this.restaurar != nil {
+            setTopologia(this.restaurar)
+            this.restaurar = nil
+        }
+        return true, nil
+    }
+}
+
+// Canvas fora da tela, para gerar imagens/testes sem monitor.
+export fn canvas(largura, altura) {
+    load()?
+    const h = _fn.fhd_canvas(largura, altura)
+    if h < 0 { return nil, _last_error() }
+    return new Tela(h, nil), nil
+}
+
+export struct Tela {
+    handle = 0
+    monitor = nil
+    restaurar = nil
+    largura = 0
+    altura = 0
+
+    new(handle, monitor) {
+        this.handle = handle
+        this.monitor = monitor
+        this.largura = _fn.fhd_width(handle)
+        this.altura = _fn.fhd_height(handle)
+    }
+
+    // Envia o quadro desenhado para o monitor.
+    mostrar() { return _status(_fn.fhd_present(this.handle)) }
+    // false depois que o usuário apertou Esc (ou a janela foi fechada).
+    aberta() { return _fn.fhd_is_open(this.handle) == 1 }
+    // Próxima tecla apertada (ver tela.teclas) ou 0.
+    tecla() { return _fn.fhd_key(this.handle) }
+    // Todas as teclas pressionadas desde a última chamada ([] se nenhuma), numa
+    // chamada só (pelo sink): num laço de quadros nenhuma tecla se perde.
+    teclas() {
+        const [ks, err] = _json((b, n) => _fn.fhd_keys(this.handle, b, n))
+        if err != nil { return [] }
+        return ks
+    }
+    // { x, y, botoes } — botoes: 1 esquerdo, 2 direito, 4 meio (somados).
+    mouse() {
+        return { x: _fn.fhd_mouse(this.handle, 0), y: _fn.fhd_mouse(this.handle, 1), botoes: _fn.fhd_mouse(this.handle, 2) }
+    }
+
+    limpar(cor = 0) { return _status(_fn.fhd_clear(this.handle, cor)) }
+    ponto(x, y, cor) { return _status(_fn.fhd_pixel(this.handle, int(x), int(y), cor)) }
+    // Retângulo preenchido.
+    retangulo(x, y, w, h, cor) { return _status(_fn.fhd_rect(this.handle, int(x), int(y), int(w), int(h), cor, 0)) }
+    // Só a borda do retângulo.
+    moldura(x, y, w, h, cor, espessura = 1) {
+        return _status(_fn.fhd_rect(this.handle, int(x), int(y), int(w), int(h), cor, int(espessura)))
+    }
+    arredondado(x, y, w, h, raio, cor) {
+        return _status(_fn.fhd_round_rect(this.handle, int(x), int(y), int(w), int(h), int(raio), cor))
+    }
+    linha(x0, y0, x1, y1, cor, espessura = 1) {
+        return _status(_fn.fhd_line(this.handle, int(x0), int(y0), int(x1), int(y1), cor, int(espessura)))
+    }
+    // Disco preenchido.
+    circulo(cx, cy, r, cor) { return _status(_fn.fhd_circle(this.handle, int(cx), int(cy), int(r), cor, 0)) }
+    // Só o contorno do círculo.
+    anel(cx, cy, r, cor, espessura = 2) {
+        return _status(_fn.fhd_circle(this.handle, int(cx), int(cy), int(r), cor, int(espessura)))
+    }
+    triangulo(x0, y0, x1, y1, x2, y2, cor) {
+        return _status(_fn.fhd_triangle(this.handle, int(x0), int(y0), int(x1), int(y1), int(x2), int(y2), cor))
+    }
+    // Degradê de c1 para c2; vertical = de cima para baixo.
+    degrade(x, y, w, h, c1, c2, vertical = true) {
+        let v = 0
+        if vertical { v = 1 }
+        return _status(_fn.fhd_gradient(this.handle, int(x), int(y), int(w), int(h), c1, c2, v))
+    }
+
+    // Fonte do texto (qualquer fonte instalada no Windows).
+    fonte(nome = "Segoe UI", negrito = false) {
+        let b = 0
+        if negrito { b = 1 }
+        return _status(_fn.fhd_font(this.handle, nome, b))
+    }
+    // Texto com o canto superior esquerdo em (x, y); aceita "\n".
+    texto(x, y, s, cor = 0xFFFFFF, tamanho = 32) {
+        return _status(_fn.fhd_text(this.handle, int(x), int(y), `${s}`, cor, int(tamanho)))
+    }
+    // Texto centralizado horizontalmente em cx.
+    textoCentro(cx, y, s, cor = 0xFFFFFF, tamanho = 32) {
+        const w = _fn.fhd_text_size(this.handle, `${s}`, int(tamanho), 0)
+        return this.texto(cx - w / 2, y, s, cor, tamanho)
+    }
+    // { largura, altura } do texto em pixels.
+    medir(s, tamanho = 32) {
+        return {
+            largura: _fn.fhd_text_size(this.handle, `${s}`, int(tamanho), 0),
+            altura: _fn.fhd_text_size(this.handle, `${s}`, int(tamanho), 1),
+        }
+    }
+
+    // Desenha uma imagem: caminho de arquivo (png, jpg, webp, gif, bmp…) ou
+    // imagem do fogu:image. largura/altura = 0: tamanho original.
+    imagem(img, x = 0, y = 0, largura = 0, altura = 0) {
+        let im = img
+        if typeof(img) == "str" { im = image.open(img)? }
+        return _status(_fn.fhd_image(this.handle, im.toBase64("bmp"), int(x), int(y), int(largura), int(altura)))
+    }
+
+    // Renderiza HTML (com CSS, fontes, SVG, JS) e desenha no canvas.
+    //   html(s, { x = 0, y = 0, largura = toda a tela, altura = toda a tela })
+    // A captura é opaca: o HTML cobre o retângulo inteiro (desenhe por cima depois).
+    html(s, opts = {}) {
+        const w = opts.get("largura") ?? this.largura
+        const h = opts.get("altura") ?? this.altura
+        const img = htmlImagem(s, w, h)?
+        return this.imagem(img, opts.get("x") ?? 0, opts.get("y") ?? 0)
+    }
+
+    // Como html(), mas carrega uma URL. opts.espera: seletor CSS a esperar.
+    pagina(url, opts = {}) {
+        const w = opts.get("largura") ?? this.largura
+        const h = opts.get("altura") ?? this.altura
+        const img = paginaImagem(url, w, h, opts.get("espera"))?
+        return this.imagem(img, opts.get("x") ?? 0, opts.get("y") ?? 0)
+    }
+
+    // Guarda o desenho atual como fundo (ex.: a parte estática de uma animação)...
+    guardarFundo() { return _status(_fn.fhd_store(this.handle)) }
+    // ...e o redesenha de uma vez, no começo de cada quadro.
+    fundo() { return _status(_fn.fhd_recall(this.handle)) }
+
+    // Salva o quadro atual como .bmp.
+    salvar(caminho) { return _status(_fn.fhd_save(this.handle, caminho)) }
+
+    fechar() {
+        if this.handle == 0 { return true, nil }
+        const rc = _fn.fhd_close(this.handle)
+        this.handle = 0
+        // Volta o Windows ao modo de projeção de antes de abrir().
+        if this.restaurar != nil {
+            setTopologia(this.restaurar)
+            this.restaurar = nil
+        }
+        return _status(rc)
+    }
+}
