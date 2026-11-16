@@ -18,7 +18,6 @@ dist/
 .DS_Store
 Thumbs.db
 
-# foguhdmi (lib Rust), DLL gerada e imagens salvas
+# foguhdmi (lib Rust), imagens salvas
 foguhdmi/target/
-native/
 out/
